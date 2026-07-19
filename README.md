@@ -7,13 +7,13 @@
 
 ## About
 
-Onca is a clean-room implementation of an Atari Jaguar emulator core written entirely from scratch.
+Onca is a clean-room implementation of an Atari Jaguar emulator core written entirely from scratch
 
 No existing emulator source code (Virtual Jaguar, MAME, BigPEmu) was consulted at any point. The implementation was built from publicly circulated Atari hardware documentation (the Tom & Jerry Technical Reference Manual) and the officially released Jaguar Doom source code.
 
 The project aims to provide a portable, maintainable, and accurate implementation. The long-term goal is a standalone emulator core that can be used directly or integrated into frontends such as Libretro.
 
-Current compatibility headline: Jaguar Doom boots to gameplay.
+Current compatibility is sparse: a handful of games run well, but the rest are incompatible to say the least. I will try my best to improve it when I find the time. In the meantime, the libretro fork of Virtual Jaguar is already well maintained, so I refer you to them if you run into issues.
 
 ## Features
 
@@ -26,10 +26,10 @@ Current status:
 - ✅ Object Processor (video compositor)
 - ✅ BIOS support (cartridge boot ROM; the Jaguar CD boot ROM is not supported)
 - 🚧 Jaguar GPU (Tom RISC)
-- 🚧 Blitter
+- 🚧 Blitter - Most of the work is done but I suspect there are lingering issues
 - 🚧 Memory subsystem
-- 🚧 Audio (DSP) - Sound FX works but Music still WIP
-- 🚧 Compatibility improvements
+- 🚧 Audio (DSP) - Sound FX works on most games but Music still WIP
+- 🚧 Compatibility improvements - honest caveat intermittent freezes observed on Doom
 
 ## Usage
 

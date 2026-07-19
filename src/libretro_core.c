@@ -53,12 +53,16 @@ static onca_gpu_t g_gpu;
 static onca_gpu_t g_dsp;
 static int         g_loaded;
 static int         g_launched;   /* CPU has entered cartridge code (past boot) */
-/* Audio-sample (I2S) interrupt timebase. Games derive their master clock from the
- * DSP audio interrupt, so its rate relative to the 60 Hz video field sets the game
- * speed. Delivered at ONCA_AUDIO_HZ via a 68000-cycle accumulator: owed interrupts
- * accrue at the exact rate and are delivered when the DSP is unmasked (so none are
- * lost while it is in an ISR). ONCA_AUDIO_HZ is the tunable knob. */
-#define ONCA_AUDIO_HZ         44100u
+/* Audio-sample (I2S) interrupt timebase. Games derive their master clock from
+ * the DSP audio interrupt, so its rate sets both game speed and audio pitch.
+ * The real rate follows from the serial clock the game programs: Doom writes
+ * SCLK=19, SMODE with word-strobe interrupts, so the I2S bit clock is
+ * 26.5939 MHz / (2*(SCLK+1)) = 664.85 kHz and the interrupt fires once per
+ * 16-bit word = 41553/s (20776 Hz stereo frames - Doom's DSP kernel units all
+ * check out against this: counter>>3 windows x4 mix steps = 20776 samples/s).
+ * Owed interrupts accrue by 68000 cycle and are delivered when the DSP can
+ * take one; a refused delivery stays owed and is retried, never dropped. */
+#define ONCA_AUDIO_HZ         41553u
 #define ONCA_CYC_PER_SAMPLE   (ONCA_CPU_HZ / ONCA_AUDIO_HZ)
 static uint64_t    g_isr_acc;    /* 68000 cycles since the last owed sample     */
 static int         g_isr_owed;   /* audio interrupts accrued, not yet delivered */
@@ -137,7 +141,7 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info) {
     info->geometry.max_height  = FB_H;
     info->geometry.aspect_ratio = 4.0f / 3.0f;
     info->timing.fps = ONCA_FPS;
-    info->timing.sample_rate = 44100.0;
+    info->timing.sample_rate = (double)ONCA_AUDIO_HZ;
 }
 
 RETRO_API void retro_init(void) { g_loaded = 0; }
@@ -406,9 +410,9 @@ RETRO_API void retro_run(void) {
                     /* Deliver an owed audio interrupt when the DSP can take one. */
                     if (g_launched && g_isr_owed > 0) {
                         uint32_t df = onca_gpu_read_ctrl(&g_dsp, 0xF1A100);
-                        if ((df & DF_I2SENA) && !(df & GF_IMASK)) {
+                        if ((df & DF_I2SENA) && !(df & GF_IMASK) &&
+                            onca_gpu_interrupt(&g_dsp, 1)) {
                             audio_capture_pair();
-                            onca_gpu_interrupt(&g_dsp, 1);
                             g_isr_owed--;
                         }
                     }
@@ -465,7 +469,7 @@ RETRO_API void retro_run(void) {
         static int16_t out[2048 * 2];
         uint32_t want = g_aud_ticks;
         if (want > 2048) want = 2048;
-        if (want == 0) want = 735;              /* nothing accrued: keep cadence */
+        if (want == 0) want = ONCA_AUDIO_HZ / 60;   /* nothing accrued: keep cadence */
         uint32_t have = g_aud_wr - g_aud_rd;
         for (uint32_t i = 0; i < want; i++) {
             if (i < have) {

@@ -32,7 +32,8 @@ int main(int c,char**v){
   onca_gpu_init(&gpu,&mem); mem.gpu=&gpu; onca_gpu_init(&dsp,&mem); dsp.is_dsp=1; mem.dsp=&dsp;
   m68k_reset(&cpu); cpu.int_vector=64; mem.cpu_pc=&cpu.pc;
   uint64_t budget=13295000u/60;
-  for(int f=0;f<frame;f++){ mem.joypad1=(f>=560&&f<620)?(1u<<TJ_A):0;
+  int nojoy=getenv("NOJOY")!=0;
+  for(int f=0;f<frame;f++){ mem.joypad1=(!nojoy&&f>=560&&f<620)?(1u<<TJ_A):0;
     mem.video_irq=1; uint64_t t=cpu.cycles+budget;
     while(cpu.cycles<t&&!cpu.halted){ m68k_set_irq(&cpu,mem.video_irq?2:0); m68k_step(&cpu);
       if(gpu.running)for(int k=0;k<16&&gpu.running;k++)onca_gpu_step(&gpu);

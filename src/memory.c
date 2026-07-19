@@ -185,6 +185,12 @@ static uint16_t jerry_reg16(onca_mem_t *m, uint32_t off) {
     if (off == JERRY_JOYBUTS)  return jaguar_joybut_word(m);
     if (off == 0x4800) return ee_clock_out(m);
     if (off == 0x5000) { ee_reset(m); return 0; }
+    /* ASI serial status ($F10032, JagLink/ComLynx UART): transmitter always
+     * ready, receiver always empty - nothing is connected, so sends complete
+     * (into the void) instead of blocking. Doom's co-op connect screen spins
+     * on the ready bit inside its uart-send before it ever re-checks the
+     * abort button; without this it can never be backed out of. */
+    if (off == 0x0032) return 0x0100;
     return ((uint16_t)m->jerry[off] << 8) | m->jerry[off + 1];
 }
 

@@ -23,7 +23,7 @@
 #include <math.h>
 
 #define CPU_HZ 13295000u
-#define AUDIO_HZ 44100u
+#define AUDIO_HZ 41553u   /* I2S word-strobe rate for SCLK=19 (see libretro_core.c) */
 #define CYC_PER_SAMPLE (CPU_HZ / AUDIO_HZ)
 
 static m68k_t cpu;
@@ -40,8 +40,12 @@ static size_t wav_n, wav_cap;
 static unsigned long g_store_jerry[0x10000];
 static unsigned long g_store_dram_lo, g_store_dram_hi;
 static unsigned long g_pc_hist[0x1000];        /* per word of DSP RAM */
+/* Opcode histograms, split by code region: below $F1B400 = kernel + sfx mixer,
+ * at/above = the job tail where the music renderer lives. */
+static unsigned long g_ops_lo[64], g_ops_hi[64];
 static void dsp_trace(void *ctx, uint32_t pc, uint16_t op) {
     (void)ctx;
+    if (pc < 0xF1B400) g_ops_lo[(op >> 10) & 0x3F]++; else g_ops_hi[(op >> 10) & 0x3F]++;
     if (pc >= 0xF1B000 && pc < 0xF1D000) g_pc_hist[((pc - 0xF1B000) >> 1) & 0xFFF]++;
     int opc = (op >> 10) & 0x3F;
     int sfield = (op >> 5) & 31;
@@ -138,9 +142,9 @@ int main(int argc, char **argv) {
                     onca_gpu_step(&dsp);
                     if (launched && isr_owed > 0) {
                         uint32_t df = onca_gpu_read_ctrl(&dsp, 0xF1A100);
-                        if ((df & DF_I2SENA) && !(df & GF_IMASK)) {
+                        if ((df & DF_I2SENA) && !(df & GF_IMASK) &&
+                            onca_gpu_interrupt(&dsp, 1)) {
                             capture_pair();
-                            onca_gpu_interrupt(&dsp, 1);
                             isr_owed--; delivered++; sec_delivered++;
                         }
                     }
@@ -176,6 +180,11 @@ int main(int argc, char **argv) {
         }
     }
     if (getenv("AUDTRACE")) {
+        printf("--- opcodes below F1B400 (kernel+sfx): ");
+        for (int i = 0; i < 64; i++) if (g_ops_lo[i]) printf("op%d=%lu ", i, g_ops_lo[i]);
+        printf("\n--- opcodes at/above F1B400 (music tail): ");
+        for (int i = 0; i < 64; i++) if (g_ops_hi[i]) printf("op%d=%lu ", i, g_ops_hi[i]);
+        printf("\n");
         printf("--- DSP stores to Jerry space (offset: count) ---\n");
         for (int i = 0; i < 0x10000; i++)
             if (g_store_jerry[i]) printf("  F1%04X : %lu\n", i, g_store_jerry[i]);

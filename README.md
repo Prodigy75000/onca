@@ -28,7 +28,7 @@ Current status:
 - 🚧 Jaguar GPU (Tom RISC)
 - 🚧 Blitter
 - 🚧 Memory subsystem
-- 🚧 Audio (DSP)
+- 🚧 Audio (DSP) - Sound FX works but Music still WIP
 - 🚧 Compatibility improvements
 
 ## Usage
@@ -57,7 +57,7 @@ Assets currently include:
 
 - `onca_libretro.dll` (Windows)
 - `onca_libretro.so` (Android arm64)
-- `onca_libretro.so` (Linux)
+-  `onca_libretro_so` (Linux)
 
 ## Project Structure
 

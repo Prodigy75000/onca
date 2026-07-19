@@ -20,10 +20,10 @@
 #include <string.h>
 
 #define CPU_HZ 13295000u
-#define AUDIO_HZ 44100u
+#define AUDIO_HZ 41553u   /* I2S word-strobe rate for SCLK=19 (see libretro_core.c) */
 #define CYC_PER_SAMPLE (CPU_HZ / AUDIO_HZ)
-#define WLO 0x008000u
-#define WHI 0x009000u
+#define WLO 0xF1B7F0u
+#define WHI 0xF1B900u
 
 static m68k_t cpu;
 static onca_mem_t mem;
@@ -63,6 +63,15 @@ static void cpu_trace(void *ctx, uint32_t pc, uint16_t op) {
 static int g_logblits;
 static void blit_cb(void *ctx, uint32_t cmd, uint32_t a1, uint32_t a2, uint32_t count) {
     (void)ctx;
+    /* SRCSHADE blits: dump the intensity iterator inputs (SHADEWATCH=frame) */
+    static long shn;
+    if (getenv("SHADEWATCH") && cur_frame >= atoi(getenv("SHADEWATCH")) &&
+        (cmd & 0x40000000u) && shn++ < 60)
+        printf("SHADE f%-4d cmd=%08X cnt=%u,%u a1=%06X a2=%06X PATD=%08X %08X SRCD=%08X %08X IINC=%08X\n",
+               cur_frame, cmd, count & 0xFFFF, count >> 16, a1 & 0xFFFFFF, a2 & 0xFFFFFF,
+               onca_peek32(&mem, 0xF02268), onca_peek32(&mem, 0xF0226C),
+               onca_peek32(&mem, 0xF02248), onca_peek32(&mem, 0xF0224C),
+               onca_peek32(&mem, 0xF02270));
     if (g_logblits <= 0) return;
     g_logblits--;
     uint32_t t = 0xF02200;
@@ -78,13 +87,11 @@ static void blit_cb(void *ctx, uint32_t cmd, uint32_t a1, uint32_t a2, uint32_t 
 static void watch_cb(void *ctx, uint32_t a, uint8_t v) {
     (void)ctx;
     hits++;
-    if (hits <= 40 || (hits % 5000) == 0)
-        printf("POKE  f%-4d $%06X <- %02X   cpu=%06X gpu(pc=%06X run=%d R14=%08X R15=%08X) dsp(pc=%06X run=%d R14=%08X R15=%08X)\n",
-               cur_frame, a, v, cpu.pc & 0xFFFFFF,
-               gpu.pc & 0xFFFFFF, gpu.running,
-               gpu.reg[gpu.bank * 32 + 14], gpu.reg[gpu.bank * 32 + 15],
-               dsp.pc & 0xFFFFFF, dsp.running,
-               dsp.reg[dsp.bank * 32 + 14], dsp.reg[dsp.bank * 32 + 15]);
+    /* the wipe hunt: log ZERO bytes written over the music job's code tail */
+    static long zn;
+    if (v == 0 && a >= 0xF1B800 && zn++ < 100)
+        printf("WIPE  f%-4d $%06X <- 00  dsp pc=%06X gpu pc=%06X 68k=%06X\n",
+               cur_frame, a, dsp.pc & 0xFFFFFF, gpu.pc & 0xFFFFFF, cpu.pc & 0xFFFFFF);
 }
 
 static void log_cb(void *ctx, int is_write, int width, onca_region_t region,
@@ -97,12 +104,22 @@ static void log_cb(void *ctx, int is_write, int width, onca_region_t region,
         printf("EEPR  f%-4d %s%d $%06X %s %08X pc=%06X\n",
                cur_frame, is_write ? "W" : "R", width, addr,
                is_write ? "<-" : "->", val, cpu.pc & 0xFFFFFF);
+    /* Joypad accesses in a chosen frame window (JOYWATCH=startframe) */
+    static long joyn;
+    if (getenv("JOYWATCH") && cur_frame >= atoi(getenv("JOYWATCH")) &&
+        addr >= 0xF14000 && addr < 0xF14004 && joyn++ < 120)
+        printf("JOY   f%-4d %s%d $%06X %s %08X pc=%06X row=%02X pad=%08X\n",
+               cur_frame, is_write ? "W" : "R", width, addr,
+               is_write ? "<-" : "->", val, cpu.pc & 0xFFFFFF,
+               mem.joy_row, mem.joypad1);
     if (!is_write) return;
-    /* 68k -> DSP job dispatches: the mailbox the DSP kernel polls. */
+    /* 68k -> DSP job dispatches: the mailbox the DSP kernel polls. Log the
+     * job's code size word (at job_ptr-4) too - the kernel copies that many
+     * bytes to $F1B140, and anything past $F1B800 lands in the accumulator. */
     static long jobn;
-    if (addr <= 0xF1B030 && addr + width > 0xF1B030 && val != 0 && jobn++ < 8)
-        printf("JOB   f%-4d 68k pc=%06X dispatches $F1B030 <- %08X\n",
-               cur_frame, cpu.pc & 0xFFFFFF, val);
+    if (addr <= 0xF1B030 && addr + width > 0xF1B030 && val != 0 && jobn++ < 20)
+        printf("JOB   f%-4d 68k pc=%06X dispatches $F1B030 <- %08X size=%u\n",
+               cur_frame, cpu.pc & 0xFFFFFF, val, onca_peek32(&mem, (val & 0xFFFFFF) - 4));
     /* 68k writes into DSP RAM above the kernel (params, voice tables) */
     static long parmn;
     if (addr >= 0xF1C000 && addr < 0xF1D000 && val != 0 && parmn++ < 120)
@@ -157,13 +174,32 @@ int main(int argc, char **argv) {
 
     uint64_t budget = (uint64_t)(CPU_HZ / 59.94);
     uint64_t isr_acc = 0; int isr_owed = 0, launched = 0;
+    long delivered = 0, last_del = 0, last_hits = 0;
+
+    /* Scripted input: SEQ="frame:tjbit:len,frame:tjbit:len,..." overrides the
+     * default A-press + cursor-move pattern (tjbit = TJ_* enum index). */
+    struct { int f, bit, len; } seq[32]; int nseq = 0;
+    if (getenv("SEQ")) {
+        char *s = getenv("SEQ");
+        while (nseq < 32 && *s) {
+            seq[nseq].f = atoi(s);            s = strchr(s, ':'); if (!s) break;
+            seq[nseq].bit = atoi(++s);        s = strchr(s, ':'); if (!s) break;
+            seq[nseq].len = atoi(++s); nseq++; s = strchr(s, ',');
+            if (!s) break; s++;
+        }
+        printf("SEQ: %d scripted presses\n", nseq);
+    }
 
     for (int f = 0; f < frames; f++) {
         cur_frame = f;
         mem.joypad1 = (f >= ta && f < tb) ? (1u << TJ_A) : 0;
-        /* menu-cursor moves after the menu is up: each should trigger a beep */
-        if ((f >= tb + 80 && f < tb + 86) || (f >= tb + 120 && f < tb + 126) ||
-            (f >= tb + 160 && f < tb + 166))
+        if (nseq) {
+            mem.joypad1 = (f >= ta && f < tb) ? (1u << TJ_A) : 0;
+            for (int i = 0; i < nseq; i++)
+                if (f >= seq[i].f && f < seq[i].f + seq[i].len)
+                    mem.joypad1 |= 1u << seq[i].bit;
+        } else if ((f >= tb + 80 && f < tb + 86) || (f >= tb + 120 && f < tb + 126) ||
+                   (f >= tb + 160 && f < tb + 166))
             mem.joypad1 = 1u << TJ_DOWN;
         mem.video_irq = 1;
         uint64_t target = cpu.cycles + budget, prev = cpu.cycles;
@@ -180,9 +216,9 @@ int main(int argc, char **argv) {
                     onca_gpu_step(&dsp);
                     if (launched && isr_owed > 0) {
                         uint32_t df = onca_gpu_read_ctrl(&dsp, 0xF1A100);
-                        if ((df & DF_I2SENA) && !(df & GF_IMASK)) {
-                            onca_gpu_interrupt(&dsp, 1);
-                            isr_owed--;
+                        if ((df & DF_I2SENA) && !(df & GF_IMASK) &&
+                            onca_gpu_interrupt(&dsp, 1)) {
+                            isr_owed--; delivered++;
                         }
                     }
                 }
@@ -199,9 +235,11 @@ int main(int argc, char **argv) {
             int ring_nz = 0, acc_nz = 0;
             for (int i = 0; i < 0x2000; i++) if (onca_peek8(&mem, 0x1F0000 + i)) ring_nz++;
             for (int i = 0; i < 0x1000; i++) if (onca_peek8(&mem, 0xF1B800 + i)) acc_nz++;
-            printf("f%-4d pc=%06X cursor=%08X ring_nz=%d acc_nz=%d sampcount=%08X isr_cnt=%08X\n",
-                   f, cpu.pc & 0xFFFFFF, onca_peek32(&mem, 0x4DC14), ring_nz, acc_nz,
-                   onca_peek32(&mem, 0x42C0C), onca_peek32(&mem, 0xF1B02C));
+            printf("f%-4d pc=%06X ring_wr_B=%ld drained_B=%ld ring_nz=%d sampcount=%08X isr_cnt=%08X mus5150C=%08X mus51B10=%08X\n",
+                   f, cpu.pc & 0xFFFFFF, hits - last_hits, (delivered - last_del) * 2L,
+                   ring_nz, onca_peek32(&mem, 0x42C0C), onca_peek32(&mem, 0xF1B02C),
+                   onca_peek32(&mem, 0x5150C), onca_peek32(&mem, 0x51B10));
+            last_hits = hits; last_del = delivered;
             for (int ch = 0; ch < 4; ch++) {
                 uint32_t b = 0x42ADC + ch * 24;
                 printf("      ch%d ptr=%08X start=%08X end=%08X vol=%08X x=%08X %08X\n", ch,

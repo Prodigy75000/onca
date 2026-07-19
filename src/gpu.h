@@ -113,8 +113,10 @@ int onca_gpu_step(onca_gpu_t *g);
 
 /* Take RISC interrupt `num` (0..5): vector to RAM_base + num*0x10, primary bank,
  * push resume PC to R31, set the interrupt mask. Used to deliver the DSP's audio
- * (I2S) sample interrupt, which games use as a timebase. */
-void onca_gpu_interrupt(onca_gpu_t *g, int num);
+ * (I2S) sample interrupt, which games use as a timebase. Returns 1 if taken,
+ * 0 if refused (mid-branch / MAC group / already masked) - the caller must
+ * keep a refused interrupt pending and retry, never drop it. */
+int onca_gpu_interrupt(onca_gpu_t *g, int num);
 
 /* FLAGS interrupt bits (shared GPU/DSP layout). */
 #define GF_IMASK   0x00000008u   /* master interrupt mask (set on entry)      */

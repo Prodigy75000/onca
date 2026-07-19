@@ -230,13 +230,18 @@ static void onca_blitter_run_body(onca_mem_t *m) {
     uint32_t pat_hi = breg(m, B_PATD_HI), pat_lo = breg(m, B_PATD_LO);
     int px_per_phrase = bppv[D] ? 64 / bppv[D] : 4;
 
-    /* SRCSHADE intensity iterator (Tech Ref: PATD lanes hold the 8-bit integer
-     * intensity, SRCDATA the fractions, IINC the saturating per-pass step).
-     * Doom shades its floor/ceiling columns with a distance-lighting ramp:
-     * iterator starts at PATD lane 0 and brightens per row. */
+    /* SRCSHADE: "uses the IINC register to modify the intensity of data read
+     * from the source... to lighten or darken images" (Tech Ref B_CMD bit 30,
+     * intended for flat shading of texture-mapped surfaces). IINC's intensity
+     * field is bits 23:0, a SIGNED 8.16 value (top 8 bits are colour and stay
+     * zero); its integer part is added to every source pixel's intensity byte,
+     * saturating at 0/255. Doom lights its wall columns this way: a column in
+     * a dim sector blits with e.g. IINC=$00E44000 = -27.75, darkening the
+     * whole column by that sector's light level. Treating this as an unsigned
+     * ramp renders the entire world full-bright. */
     int srcshade = (cmd & BC_SRCSHADE) != 0;
-    int64_t ii = ((int64_t)(pat_lo & 0xFF) << 24) | 0;   /* 8.24 accumulator */
-    int32_t iinc = (int32_t)breg(m, B_IINC);             /* per-pass step    */
+    int32_t iinc = (int32_t)breg(m, B_IINC);
+    int shade = ((int32_t)((uint32_t)iinc << 8)) >> 24;  /* signed integer part */
 
     for (int o = 0; o < outer; o++) {
         for (int i = 0; i < inner; i++) {
@@ -254,10 +259,8 @@ static void onca_blitter_run_body(onca_mem_t *m) {
             }
             /* Shade the source CRY pixel's intensity byte (saturating). */
             if (srcshade && !patdsel) {
-                int shade = (int)(ii >> 24);
-                if (shade < 0) shade = 0; else if (shade > 255) shade = 255;
                 int y8 = (int)(s & 0xFF) + shade;
-                if (y8 > 255) y8 = 255;
+                if (y8 < 0) y8 = 0; else if (y8 > 255) y8 = 255;
                 s = (s & 0xFFFFFF00u) | (uint32_t)y8;
             }
             uint32_t d = dsten ? read_px(m, basev[D], wv[D], bppv[D], xi[D], yi[D]) : 0;
@@ -286,7 +289,6 @@ static void onca_blitter_run_body(onca_mem_t *m) {
         }
         xi[0] = a1fx >> 16; yi[0] = a1fy >> 16;
         if (upda2) { xi[1] += a2sx; yi[1] += a2sy; }
-        if (srcshade) ii += iinc;   /* intensity ramp advances per pass */
     }
 
     /* The pointer registers are LIVE state on real hardware: the blit walks

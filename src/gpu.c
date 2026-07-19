@@ -99,9 +99,14 @@ static inline void set_zn(onca_gpu_t *g, uint32_t r) {
  * bank is forced, and the resume address is pushed onto the primary R31 stack
  * (R31 -= 4; mem[R31] = pc-2, since the service routine adds 2 before returning).
  * Caller must have checked the source is enabled and not masked. */
-void onca_gpu_interrupt(onca_gpu_t *g, int num) {
-    if (!g->running || g->delay_pending || g->mac_lock) return;   /* clean boundary only */
-    if (g->flags_hi & 0x08) return;                 /* IMASK already set */
+int onca_gpu_interrupt(onca_gpu_t *g, int num) {
+    /* Refuse at unclean boundaries (mid-branch, inside a MAC group, already in
+     * an ISR). Returns 0 so the caller keeps the interrupt OWED and retries -
+     * dropping it instead skews every consumer of the ISR's sample counter
+     * (Doom's music ran at ~70% speed because deliveries landing in the ISR's
+     * own return-jump delay slot were being discarded). */
+    if (!g->running || g->delay_pending || g->mac_lock) return 0;
+    if (g->flags_hi & 0x08) return 0;               /* IMASK already set */
     uint32_t base = g->is_dsp ? 0xF1B000u : 0xF03000u;
     uint32_t r31 = (g->reg[31] - 4) & 0xFFFFFF;     /* primary bank stack */
     onca_poke32(g->mem, r31, (g->pc - 2) & 0xFFFFFF);
@@ -111,6 +116,7 @@ void onca_gpu_interrupt(onca_gpu_t *g, int num) {
      * bank calc in onca_gpu_step), but g->bank keeps the underlying code's
      * REGPAGE value so the ISR's save/restore of D_FLAGS returns to it. */
     g->pc = base + (uint32_t)(num & 7) * 0x10;
+    return 1;
 }
 
 /* ---- jump condition ---- */

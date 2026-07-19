@@ -87,4 +87,4 @@ Users must provide their own legally obtained BIOS files and game software where
 
 Licensed under GPL-3.0-or-later.
 
-See the LICENSE notice and the full license text in COPYING.
+See the NOTICE file and the full license text in COPYING.

@@ -196,6 +196,45 @@ static void t_mac_group(void) {
           "IMULTN/IMACN no write-back (R2=%08X R4=%08X)", g.reg[2], g.reg[4]);
 }
 
+static void t_dsp_modulo(void) {
+    /* DSP ADDQMOD/SUBQMOD: D_MOD bits that are SET are preserved from the
+     * original register (ring base); CLEAR bits take the sum (offset wraps).
+     * Doom's sample ring: D_MOD=$FFFFE000, 8KB ring at $1F0000 - the pointer
+     * must wrap $1F1FFE+4 -> $1F0002, never march out of the ring. */
+    begin();
+    g.is_dsp = 1;
+    onca_gpu_write_ctrl(&g, 0xF1A118, 0xFFFFE000u);   /* D_MOD */
+    emit(ENC(38, 0, 0)); emiti(0x001F1FFEu);
+    emit(ENC(63, 4, 0));                       /* ADDQMOD #4,R0 */
+    emit(ENC(38, 0, 1)); emiti(0x001F0002u);
+    emit(ENC(54, 4, 1));                       /* SUBQMOD #4,R1 */
+    go(4);
+    CHECK(g.reg[0] == 0x001F0002u, "ADDQMOD wrap: R0=%08X (want 001F0002)", g.reg[0]);
+    CHECK(g.reg[1] == 0x001F1FFEu, "SUBQMOD wrap: R1=%08X (want 001F1FFE)", g.reg[1]);
+}
+
+static void t_dsp_sat16s(void) {
+    /* Op 33 is unsigned SAT16 on Tom but signed SAT16S on Jerry; Doom's audio
+     * mixer relies on the signed clamp (unsigned would half-wave-rectify). */
+    begin();
+    g.is_dsp = 1;
+    emit(ENC(38, 0, 0)); emiti((uint32_t)-40000);
+    emit(ENC(33, 0, 0));                       /* SAT16S -> -32768 */
+    emit(ENC(38, 0, 1)); emiti(40000u);
+    emit(ENC(33, 0, 1));                       /* SAT16S -> 32767 */
+    emit(ENC(38, 0, 2)); emiti((uint32_t)-5);
+    emit(ENC(33, 0, 2));                       /* SAT16S -> -5 (unchanged) */
+    go(6);
+    CHECK(g.reg[0] == (uint32_t)-32768, "SAT16S low clamp: R0=%08X", g.reg[0]);
+    CHECK(g.reg[1] == 32767, "SAT16S high clamp: R1=%u", g.reg[1]);
+    CHECK(g.reg[2] == (uint32_t)-5, "SAT16S passthrough: R2=%08X", g.reg[2]);
+    begin();                                   /* Tom stays unsigned */
+    emit(ENC(38, 0, 0)); emiti((uint32_t)-5);
+    emit(ENC(33, 0, 0));                       /* SAT16 -> 0 */
+    go(2);
+    CHECK(g.reg[0] == 0, "Tom SAT16 unsigned clamp: R0=%u", g.reg[0]);
+}
+
 int main(void) {
     printf("== Onca GPU (Tom RISC) unit tests ==\n");
     t_arith();
@@ -209,6 +248,8 @@ int main(void) {
     t_align_assert();
     t_mult_16bit();
     t_mac_group();
+    t_dsp_modulo();
+    t_dsp_sat16s();
     printf("== %d passed, %d failed ==\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

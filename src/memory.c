@@ -53,6 +53,11 @@ void onca_mem_init(onca_mem_t *m) {
      * bits idle high (no button pressed = 1). Seed all-idle. */
     m->jerry[JERRY_JOYBUTS]     = 0x00;
     m->jerry[JERRY_JOYBUTS + 1] = 0x1F; /* buttons idle high, low 5 bits set */
+
+    /* Blank cart EEPROM: an erased 93C46 reads all-ones, which makes a game's
+     * saved-settings checksum fail so it falls back to sane defaults. */
+    memset(m->ee_data, 0xFF, sizeof(m->ee_data));
+    m->ee_do = 1;
 }
 
 void onca_mem_set_cart(onca_mem_t *m, uint8_t *data, size_t size) {
@@ -101,6 +106,7 @@ static const int joy_jb1_row[4] = { TJ_A, TJ_B, TJ_C, TJ_OPTION };
  * active low (0 = held). All other bits idle high. */
 static uint16_t jaguar_joyst_word(onca_mem_t *m) {
     uint16_t v = 0xFFFF;
+    if (!m->ee_do) v &= ~1u;   /* cart EEPROM DO line, active transaction */
     for (int row = 0; row < 4; row++) {
         if (m->joy_row & (1u << row)) continue;          /* row not selected */
         for (int b = 0; b < 4; b++)
@@ -121,9 +127,64 @@ static uint16_t jaguar_joybut_word(onca_mem_t *m) {
     return v;
 }
 
+/* ---- cart EEPROM (93C46) bit-bang over Jerry GPIO ---- */
+
+/* $F15000 access = chip-select toggle: abort any transaction in progress. */
+static void ee_reset(onca_mem_t *m) {
+    m->ee_state = 0; m->ee_bits = 0; m->ee_shift = 0; m->ee_wbits = 0;
+    m->ee_do = 1;    /* DO idles high (also reads as "ready") */
+}
+
+/* Write to $F14800: clock one bit in (DI = bit 0 of the written value). */
+static void ee_clock_in(onca_mem_t *m, uint32_t v) {
+    int di = (int)(v & 1);
+    if (m->ee_state == 2) {                      /* collecting write data */
+        m->ee_wdata = (uint16_t)((m->ee_wdata << 1) | di);
+        if (++m->ee_wbits == 16) {
+            if (m->ee_wen) { m->ee_data[m->ee_addr] = m->ee_wdata; m->ee_dirty = 1; }
+            ee_reset(m);
+        }
+        return;
+    }
+    m->ee_shift = (uint16_t)((m->ee_shift << 1) | di);
+    if (++m->ee_bits < 9) return;
+    /* 9-bit command: start(1) | 2-bit opcode | 6-bit address */
+    uint16_t cmd = m->ee_shift & 0x1FF;
+    int op = (cmd >> 6) & 3, addr = cmd & 0x3F;
+    m->ee_bits = 0; m->ee_shift = 0;
+    if (!(cmd & 0x100)) return;                  /* no start bit: ignore */
+    switch (op) {
+    case 2: m->ee_state = 1; m->ee_addr = (uint8_t)addr; m->ee_bit = 15; break;   /* READ  */
+    case 1: m->ee_state = 2; m->ee_addr = (uint8_t)addr; m->ee_wbits = 0; break;  /* WRITE */
+    case 3: if (m->ee_wen) { m->ee_data[addr] = 0xFFFF; m->ee_dirty = 1; } break; /* ERASE */
+    case 0:
+        switch ((addr >> 4) & 3) {
+        case 3: m->ee_wen = 1; break;                                             /* EWEN  */
+        case 0: m->ee_wen = 0; break;                                             /* EWDS  */
+        case 2: if (m->ee_wen) { memset(m->ee_data, 0xFF, sizeof(m->ee_data));    /* ERAL  */
+                                 m->ee_dirty = 1; } break;
+        }
+        break;
+    }
+}
+
+/* Read of $F14800 = one clock pulse: shift the next data bit onto the DO
+ * line. The game then samples DO from JOYSTICK ($F14000) bit 0 - that is how
+ * the part is wired on the cart connector (Doom's reader: TST $F14800 to
+ * clock, then MOVE.W $F14000 / LSR #1 / ADDX to collect the bit). Sequential
+ * reads roll into the next word, as the part does. */
+static uint16_t ee_clock_out(onca_mem_t *m) {
+    if (m->ee_state != 1) return 1;
+    m->ee_do = (uint8_t)((m->ee_data[m->ee_addr] >> m->ee_bit) & 1);
+    if (--m->ee_bit < 0) { m->ee_bit = 15; m->ee_addr = (m->ee_addr + 1) & 63; }
+    return m->ee_do;
+}
+
 static uint16_t jerry_reg16(onca_mem_t *m, uint32_t off) {
     if (off == JERRY_JOYSTICK) return jaguar_joyst_word(m);
     if (off == JERRY_JOYBUTS)  return jaguar_joybut_word(m);
+    if (off == 0x4800) return ee_clock_out(m);
+    if (off == 0x5000) { ee_reset(m); return 0; }
     return ((uint16_t)m->jerry[off] << 8) | m->jerry[off + 1];
 }
 
@@ -296,6 +357,10 @@ static void write_impl(onca_mem_t *m, uint32_t a, int width, uint32_t v) {
          * controller row-select for the next JOYSTICK/JOYBUTS read. */
         if (off <= (JERRY_JOYSTICK + 1) && off + width > (JERRY_JOYSTICK + 1))
             m->joy_row = m->jerry[JERRY_JOYSTICK + 1];
+        /* Cart EEPROM GPIO: a write to $F14800 clocks a bit in; touching
+         * $F15000 resets the transaction. */
+        if (off <= 0x4800 && off + width > 0x4800) ee_clock_in(m, v);
+        if (off <= 0x5000 && off + width > 0x5000) ee_reset(m);
         do_log(m, 1, width, ONCA_LOG_JERRY, a, v);
         return;
     }
@@ -340,6 +405,11 @@ uint32_t onca_peek32(onca_mem_t *m, uint32_t a) {
 
 void onca_poke8(onca_mem_t *m, uint32_t a, uint8_t v) {
     a &= 0x00FFFFFFu;
+    /* Coprocessor write watch (diagnostics): pokes are the GPU/DSP/Blitter
+     * write funnel, invisible to the CPU-bus log, so corruption hunts need
+     * this hook to catch a RISC store landing where it shouldn't. */
+    if (m->watch_cb && a >= m->watch_lo && a < m->watch_hi)
+        m->watch_cb(m->watch_ctx, a, v);
     if (m->gpu && a >= GPU_CTRL_LO && a < GPU_CTRL_HI) {
         uint32_t reg = a & ~3u, cur = onca_gpu_read_ctrl(m->gpu, reg);
         int sh = 8 * (3 - (a & 3));

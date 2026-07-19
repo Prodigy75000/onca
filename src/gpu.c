@@ -64,21 +64,26 @@ void onca_gpu_write_ctrl(onca_gpu_t *g, uint32_t addr, uint32_t v) {
         g->ctrl = v;
         g->running = (v & GC_GPUGO) ? 1 : 0;
         break;
-    case 0x18: g->hidata = v; break;
+    case 0x18:                            /* G_HIDATA (Tom) / D_MOD (Jerry) -
+                                           * the one offset where the two
+                                           * control blocks differ. Doom's DSP
+                                           * kernel writes $FFFFE000 here for
+                                           * its 8KB sample ring. */
+        if (g->is_dsp) g->mod = v; else g->hidata = v;
+        break;
     case 0x1C: g->divctrl = v; break;     /* write side = DIVCTRL */
     default: break;
     }
-    if (g->is_dsp && (addr & 0x1Cu) == 0x04) g->mod = v;   /* D_MOD alias */
 }
 
 uint32_t onca_gpu_read_ctrl(onca_gpu_t *g, uint32_t addr) {
     switch (addr & 0x1Cu) {
     case 0x00: return flags_get(g);
-    case 0x04: return g->is_dsp ? g->mod : g->mtxc;
+    case 0x04: return g->mtxc;
     case 0x08: return g->mtxa;
     case 0x10: return g->pc;
     case 0x14: return g->ctrl | (g->running ? GC_GPUGO : 0);
-    case 0x18: return g->hidata;
+    case 0x18: return g->is_dsp ? g->mod : g->hidata;
     case 0x1C: return g->remain;
     default: return 0;
     }
@@ -291,8 +296,13 @@ int onca_gpu_step(onca_gpu_t *g) {
     case 32: /* SAT8 */ {
         int32_t s = (int32_t)rd; res = s < 0 ? 0 : (s > 255 ? 255 : (uint32_t)s);
         R[dfield] = res; set_zn(g, res); break; }
-    case 33: /* SAT16 */ {
-        int32_t s = (int32_t)rd; res = s < 0 ? 0 : (s > 65535 ? 65535 : (uint32_t)s);
+    case 33: /* SAT16 (Tom: unsigned, pixel math) / SAT16S (Jerry: signed -
+              * the DSP variant saturates to [-32768,32767]; Doom's mixer runs
+              * its accumulated audio through it, so an unsigned clamp here
+              * half-wave-rectifies every sound). */ {
+        int32_t s = (int32_t)rd;
+        if (g->is_dsp) res = (uint32_t)(s < -32768 ? -32768 : (s > 32767 ? 32767 : s));
+        else           res = s < 0 ? 0 : (s > 65535 ? 65535 : (uint32_t)s);
         R[dfield] = res; set_zn(g, res); break; }
     case 34: /* MOVE Rs,Rd */
         R[dfield] = rs; break;
@@ -353,10 +363,12 @@ int onca_gpu_step(onca_gpu_t *g) {
             g->last_jmp_pc = ins_pc; g->last_jmp_op = op; g->last_jmp_tgt = g->delay_target; }
         break; }
     case 54: if (g->is_dsp) { /* SUBQMOD #n,Rn (DSP-only): subtract, wrapping the
-              * offset within the D_MOD modulo mask (base bits ~D_MOD preserved) -
-              * used for audio ring buffers. */
+              * offset within the D_MOD modulo mask. Bits SET in D_MOD are
+              * preserved from the original register (the ring's base address);
+              * CLEAR bits take the subtraction result (the wrapping offset).
+              * Doom's sample ring: D_MOD=$FFFFE000, 8KB ring at $1F0000. */
         uint32_t n = sfield ? sfield : 32; uint32_t raw = rd - n;
-        res = (rd & ~g->mod) | (raw & g->mod);
+        res = (rd & g->mod) | (raw & ~g->mod);
         R[dfield] = res; g->cf = (rd < n); set_zn(g, res); break;
     } else { /* MMULT - systolic matrix multiply (Tom manual). One source
                 * matrix is in the SECONDARY register bank, packed two signed
@@ -399,9 +411,11 @@ int onca_gpu_step(onca_gpu_t *g) {
         int32_t s = (int32_t)rd; res = s < 0 ? 0 : (s > 0xFFFFFF ? 0xFFFFFF : (uint32_t)s);
         R[dfield] = res; set_zn(g, res); break; }
     case 63:
-        if (g->is_dsp) { /* ADDQMOD #n,Rn (DSP-only): add, wrapping within D_MOD */
+        if (g->is_dsp) { /* ADDQMOD #n,Rn (DSP-only): add, wrapping within D_MOD.
+                          * Set mask bits preserve the original (ring base);
+                          * clear bits take the sum (offset wraps). */
             uint32_t n = sfield ? sfield : 32; uint32_t raw = rd + n;
-            res = (rd & ~g->mod) | (raw & g->mod);
+            res = (rd & g->mod) | (raw & ~g->mod);
             g->cf = (raw < rd); R[dfield] = res; set_zn(g, res);
         } else {         /* PACK / UNPACK (Tom) - pixel (un)pack, stubbed as move */
             R[dfield] = rd;

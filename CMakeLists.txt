@@ -15,6 +15,7 @@ add_compile_options(-Wall -Wextra)
 set(CORE_SRC
   src/m68k.c
   src/memory.c
+  src/blitter.c
   src/op.c
   src/gpu.c
   src/bios.c
@@ -40,8 +41,8 @@ target_compile_definitions(onca_host PRIVATE RETRO_API=)
 
 # unit tests
 add_executable(onca_test_m68k src/m68k.c tests/test_m68k.c)
-add_executable(onca_test_op src/m68k.c src/memory.c src/op.c src/gpu.c tests/test_op.c)
-add_executable(onca_test_gpu src/memory.c src/gpu.c tests/test_gpu.c)
+add_executable(onca_test_op src/m68k.c src/memory.c src/blitter.c src/op.c src/gpu.c tests/test_op.c)
+add_executable(onca_test_gpu src/memory.c src/blitter.c src/gpu.c tests/test_gpu.c)
 enable_testing()
 add_test(NAME m68k COMMAND onca_test_m68k)
 add_test(NAME op COMMAND onca_test_op)

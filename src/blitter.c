@@ -147,12 +147,15 @@ void onca_blitter_run(onca_mem_t *m) {
 static void onca_blitter_run_body(onca_mem_t *m) {
     uint32_t cmd   = breg(m, 0xF02238);
     uint32_t count = breg(m, B_COUNT);
+    /* B_COUNT: inner (pixels per line) and outer (lines) are full 16-bit
+     * fields - big single-row blits are real (Doom's menu copies its whole
+     * 320x200 compose buffer as one 16000-pixel row). Clamping them truncates
+     * such blits, so the only guard is on total work. */
     int inner = (int)(count & 0xFFFF);
     int outer = (int)(count >> 16);
     if (inner <= 0 || outer < 0) return;
-    if (inner > 4096) inner = 4096;
-    if (outer > 4096) outer = 4096;
     if (outer == 0) outer = 1;
+    if ((int64_t)inner * outer > (int64_t)1 << 24) return;  /* runaway command */
 
     uint32_t a1base = breg(m, A1_BASE) & 0xFFFFFF;
     uint32_t a1flags = breg(m, A1_FLAGS);

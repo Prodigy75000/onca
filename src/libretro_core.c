@@ -64,6 +64,28 @@ static uint64_t    g_isr_acc;    /* 68000 cycles since the last owed sample     
 static int         g_isr_owed;   /* audio interrupts accrued, not yet delivered */
 static uint16_t    g_fb[FB_W * FB_H];
 
+/* Audio output. The DSP's sample handler writes the stereo DAC latches (LTXD
+ * $F1A148 / RTXD $F1A14C, per the Jerry serial-interface register list); the
+ * I2S interrupt itself is the sample clock. Each time an interrupt is
+ * delivered, the latches hold the pair produced by the previous handler run,
+ * so we capture them right before delivery: exactly one stereo frame per
+ * interrupt, at ONCA_AUDIO_HZ. A ring buffer decouples capture from the once-
+ * per-video-frame drain to the frontend; when the DSP produced fewer pairs
+ * than the timebase accrued (masked DSP, boot ROM, no game), the drain pads
+ * with the last pair so the stream never starves. */
+#define AUD_RING 8192                     /* stereo frames; power of two */
+static int16_t   g_aud_ring[AUD_RING][2];
+static uint32_t  g_aud_wr, g_aud_rd;      /* free-running indices            */
+static uint32_t  g_aud_ticks;             /* sample ticks accrued this frame */
+static int16_t   g_aud_last[2];           /* pad value: last pair sent       */
+
+static void audio_capture_pair(void) {
+    if (((g_aud_wr - g_aud_rd) & 0xFFFFFFFFu) >= AUD_RING) return;  /* full */
+    g_aud_ring[g_aud_wr % AUD_RING][0] = (int16_t)(onca_peek32(&g_mem, 0xF1A148) & 0xFFFF);
+    g_aud_ring[g_aud_wr % AUD_RING][1] = (int16_t)(onca_peek32(&g_mem, 0xF1A14C) & 0xFFFF);
+    g_aud_wr++;
+}
+
 /* Absolute ".jag" executable (dev-kit format) loaded directly into DRAM,
  * bypassing the boot ROM: these are homebrew/demo programs meant to be dropped
  * at a fixed RAM address by a dev board and jumped to. They set up their own
@@ -152,6 +174,9 @@ static void boot_from_rom(void) {
     g_launched = 0;
     g_isr_acc = 0;
     g_isr_owed = 0;
+    g_aud_wr = g_aud_rd = 0;
+    g_aud_ticks = 0;
+    g_aud_last[0] = g_aud_last[1] = 0;
 
     if (g_jag_mode && g_jag_code) {
         /* Drop the program image into DRAM and jump straight to it, as a dev
@@ -320,13 +345,11 @@ RETRO_API void retro_unload_game(void) {
     g_jag_mode = 0;
 }
 
-static uint32_t g_raw_pad;   /* raw RetroPad bitmask this frame (for the input HUD) */
-
 /* Map the libretro RetroPad to the Jaguar pad-1 button matrix. */
 static void poll_input(void) {
-    if (!input_state_cb) { g_mem.joypad1 = 0; g_raw_pad = 0; return; }
-    uint32_t p = 0, raw = 0;
-    #define RP(id) (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, (id)) ? (raw |= 1u << (id), 1) : 0)
+    if (!input_state_cb) { g_mem.joypad1 = 0; return; }
+    uint32_t p = 0;
+    #define RP(id) input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, (id))
     if (RP(RETRO_DEVICE_ID_JOYPAD_UP))     p |= 1u << TJ_UP;
     if (RP(RETRO_DEVICE_ID_JOYPAD_DOWN))   p |= 1u << TJ_DOWN;
     if (RP(RETRO_DEVICE_ID_JOYPAD_LEFT))   p |= 1u << TJ_LEFT;
@@ -340,23 +363,6 @@ static void poll_input(void) {
     if (RP(RETRO_DEVICE_ID_JOYPAD_R))      p |= 1u << TJ_HASH;   /* Doom: strafe R */
     #undef RP
     g_mem.joypad1 = p;
-    g_raw_pad = raw;
-}
-
-/* Input HUD: while any RetroPad button is held, paint a bright green bar with a
- * lit square per pressed button along the top of the frame. This is a test aid -
- * if it never lights when you press the on-screen buttons, the frontend is not
- * sending input to the core (not an emulation bug). Squares (left to right):
- * B Y Sel Start Up Down Left Right A X L R. */
-static void draw_input_hud(void) {
-    if (!g_raw_pad) return;
-    for (int id = 0; id < 12; id++) {
-        int lit = (g_raw_pad >> id) & 1;
-        int x0 = 4 + id * 16;
-        for (int y = 2; y < 14; y++)
-            for (int x = x0; x < x0 + 12 && x < FB_W; x++)
-                g_fb[y * FB_W + x] = lit ? 0x07E0 : 0x2104;  /* green lit / grey */
-    }
 }
 
 RETRO_API void retro_run(void) {
@@ -382,7 +388,7 @@ RETRO_API void retro_run(void) {
             /* Accrue audio-sample interrupts at the exact rate (by 68000 cycle). */
             g_isr_acc += g_cpu.cycles - prev_cyc;
             prev_cyc = g_cpu.cycles;
-            while (g_isr_acc >= ONCA_CYC_PER_SAMPLE) { g_isr_acc -= ONCA_CYC_PER_SAMPLE; if (g_isr_owed < 64) g_isr_owed++; }
+            while (g_isr_acc >= ONCA_CYC_PER_SAMPLE) { g_isr_acc -= ONCA_CYC_PER_SAMPLE; if (g_isr_owed < 64) g_isr_owed++; g_aud_ticks++; }
             /* Step the GPU (Tom RISC, ~2x the 68000 clock) concurrently: the boot
              * and games kick the GPU mid-frame and busy-wait on it (and on the
              * Blitter it drives), so it has to make progress during the frame,
@@ -401,6 +407,7 @@ RETRO_API void retro_run(void) {
                     if (g_launched && g_isr_owed > 0) {
                         uint32_t df = onca_gpu_read_ctrl(&g_dsp, 0xF1A100);
                         if ((df & DF_I2SENA) && !(df & GF_IMASK)) {
+                            audio_capture_pair();
                             onca_gpu_interrupt(&g_dsp, 1);
                             g_isr_owed--;
                         }
@@ -450,12 +457,28 @@ RETRO_API void retro_run(void) {
     }
 #endif
 
-    draw_input_hud();
     if (video_cb) video_cb(g_fb, FB_W, FB_H, FB_W * sizeof(uint16_t));
+    /* Drain captured DSP samples; emit exactly as many stereo frames as sample
+     * ticks accrued this video frame so the audio stream tracks the emulated
+     * timebase (the frontend's dynamic rate control absorbs the residue). */
     if (audio_batch_cb) {
-        static int16_t silence[735 * 2];
-        audio_batch_cb(silence, 735);
+        static int16_t out[2048 * 2];
+        uint32_t want = g_aud_ticks;
+        if (want > 2048) want = 2048;
+        if (want == 0) want = 735;              /* nothing accrued: keep cadence */
+        uint32_t have = g_aud_wr - g_aud_rd;
+        for (uint32_t i = 0; i < want; i++) {
+            if (i < have) {
+                g_aud_last[0] = g_aud_ring[g_aud_rd % AUD_RING][0];
+                g_aud_last[1] = g_aud_ring[g_aud_rd % AUD_RING][1];
+                g_aud_rd++;
+            }
+            out[i * 2 + 0] = g_aud_last[0];
+            out[i * 2 + 1] = g_aud_last[1];
+        }
+        audio_batch_cb(out, want);
     }
+    g_aud_ticks = 0;
 }
 
 RETRO_API size_t retro_serialize_size(void) { return 0; }

@@ -115,6 +115,32 @@ typedef struct onca_mem {
     void (*blit_trace)(void *ctx, uint32_t cmd, uint32_t a1, uint32_t a2, uint32_t count);
     void *blit_trace_ctx;
 
+    /* Optional coprocessor write watch: fires per byte for any poke (GPU/DSP
+     * STORE or Blitter output) landing in [watch_lo, watch_hi). CPU-bus writes
+     * are visible via `log`; pokes are not, hence this separate hook. */
+    uint32_t watch_lo, watch_hi;
+    void (*watch_cb)(void *ctx, uint32_t addr, uint8_t val);
+    void *watch_ctx;
+
+    /* Cartridge EEPROM (93C46 serial, 64 x 16-bit), bit-banged over Jerry GPIO:
+     * writes to $F14800 clock a command/data bit in (DI = bit 0), reads of
+     * $F14800 clock a data bit out (DO = bit 0), and touching $F15000 resets
+     * the transaction (chip-select toggle). Blank chip = all $FFFF, so a
+     * game's settings checksum fails and it falls back to defaults (Doom
+     * stores its sound volumes here - an all-zero EEPROM read "validates" a
+     * zeroed settings block and silences the game). */
+    uint16_t ee_data[64];
+    uint16_t ee_shift;      /* command shift register (9 bits)              */
+    uint8_t  ee_bits;       /* command bits received                        */
+    uint8_t  ee_state;      /* 0 = command, 1 = reading out, 2 = write data */
+    uint8_t  ee_wen;        /* write/erase enabled (EWEN latch)             */
+    uint8_t  ee_addr;       /* active word address                          */
+    int8_t   ee_bit;        /* next data bit index (15 down to 0)           */
+    uint16_t ee_wdata;      /* write-data shift register                    */
+    uint8_t  ee_wbits;      /* write-data bits received                     */
+    uint8_t  ee_do;         /* DO line level, presented on JOYSTICK bit 0   */
+    uint8_t  ee_dirty;      /* contents modified (frontend may persist)     */
+
     /* Video-interrupt latch. TOM raises it at VBLANK; the 68000 handler clears
      * it by writing INT1 ($F000E0). Modelling the clear (rather than holding
      * the IRQ line) is what makes exactly one interrupt fire per field instead

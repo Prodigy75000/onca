@@ -22,8 +22,8 @@
 #define CPU_HZ 13295000u
 #define AUDIO_HZ 41553u   /* I2S word-strobe rate for SCLK=19 (see libretro_core.c) */
 #define CYC_PER_SAMPLE (CPU_HZ / AUDIO_HZ)
-#define WLO 0xF1B7F0u
-#define WHI 0xF1B900u
+#define WLO 0x000000u
+#define WHI 0x000400u
 
 static m68k_t cpu;
 static onca_mem_t mem;
@@ -87,23 +87,23 @@ static void blit_cb(void *ctx, uint32_t cmd, uint32_t a1, uint32_t a2, uint32_t 
 static void watch_cb(void *ctx, uint32_t a, uint8_t v) {
     (void)ctx;
     hits++;
-    /* the wipe hunt: log ZERO bytes written over the music job's code tail */
+    /* 68k vector-table clobber hunt: any coprocessor poke into $0-$400 */
     static long zn;
-    if (v == 0 && a >= 0xF1B800 && zn++ < 100)
-        printf("WIPE  f%-4d $%06X <- 00  dsp pc=%06X gpu pc=%06X 68k=%06X\n",
-               cur_frame, a, dsp.pc & 0xFFFFFF, gpu.pc & 0xFFFFFF, cpu.pc & 0xFFFFFF);
+    if (zn++ < 60)
+        printf("CLOB  f%-4d $%06X <- %02X  dsp pc=%06X R31=%08X gpu pc=%06X run=%d\n",
+               cur_frame, a, v, dsp.pc & 0xFFFFFF, dsp.reg[31],
+               gpu.pc & 0xFFFFFF, gpu.running);
 }
 
 static void log_cb(void *ctx, int is_write, int width, onca_region_t region,
                    uint32_t addr, uint32_t val) {
     (void)ctx; (void)region;
-    /* Cart EEPROM (93C46 serial) GPIO accesses live in Jerry space above the
-     * joypad registers; log every touch to see how Doom reads its settings. */
-    static long een;
-    if (addr >= 0xF14400 && addr < 0xF16000 && een++ < 60)
-        printf("EEPR  f%-4d %s%d $%06X %s %08X pc=%06X\n",
-               cur_frame, is_write ? "W" : "R", width, addr,
-               is_write ? "<-" : "->", val, cpu.pc & 0xFFFFFF);
+    /* 68k setup writes to the DSP control block: the FLAGS/PC/CTRL order
+     * decides when a host-forced interrupt 0 may legally fire. */
+    static long dcn;
+    if (is_write && addr >= 0xF1A100 && addr < 0xF1A118 && dcn++ < 40)
+        printf("DCTL  f%-4d 68k pc=%06X $%06X <- %08X (w%d)\n",
+               cur_frame, cpu.pc & 0xFFFFFF, addr, val, width);
     /* Joypad accesses in a chosen frame window (JOYWATCH=startframe) */
     static long joyn;
     if (getenv("JOYWATCH") && cur_frame >= atoi(getenv("JOYWATCH")) &&

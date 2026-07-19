@@ -63,6 +63,11 @@ void onca_gpu_write_ctrl(onca_gpu_t *g, uint32_t addr, uint32_t v) {
     case 0x14:                            /* G_CTRL / D_CTRL */
         g->ctrl = v;
         g->running = (v & GC_GPUGO) ? 1 : 0;
+        /* Bit 2 = host-forced RISC interrupt 0 (Tom manual GPUINT0). Latch it;
+         * the step loop delivers it at the next clean boundary. Wolf3D runs
+         * its whole DSP command protocol on this: mailbox at $F1B0D0, then
+         * D_CTRL=5 (GO + INT0), then poll until the int-0 handler clears it. */
+        if (v & 0x04u) g->pend_int0 = 1;
         break;
     case 0x18:                            /* G_HIDATA (Tom) / D_MOD (Jerry) -
                                            * the one offset where the two
@@ -147,6 +152,12 @@ static inline uint16_t fetch(onca_gpu_t *g) {
 
 int onca_gpu_step(onca_gpu_t *g) {
     if (!g->running) return 0;
+    /* Host-forced interrupt 0 stays latched until the program has ENABLED the
+     * source (FLAGS bit 4, the int-0 enable - same scheme as I2S's bit 5) and
+     * the core is at a clean boundary. Delivering before the enable fires the
+     * ISR before the program has set up its interrupt stack. */
+    if (g->pend_int0 && (g->flags_hi & 0x10u) && onca_gpu_interrupt(g, 0))
+        g->pend_int0 = 0;
 
     /* Register bank: while the master interrupt mask is set, the PRIMARY bank
      * (0) is forced for register access regardless of REGPAGE (g->bank). */

@@ -75,7 +75,12 @@ static uint16_t cry_to_rgb565(uint16_t v) {
 }
 
 uint16_t onca_op_decode16(uint16_t v, int cry) {
-    return cry ? cry_to_rgb565(v) : v;   /* RGB16 path: already RGB565 */
+    if (cry) return cry_to_rgb565(v);
+    /* Jaguar RGB16 is NOT standard 565: red bits 15-11, BLUE bits 10-6,
+     * GREEN bits 5-0 (Tech Ref, video mode 3 / pixel data path). Swap the
+     * two low fields into RGB565 - passing it through raw turns Worms'
+     * green grenades blue and its warm whites pink. */
+    return (uint16_t)((v & 0xF800u) | ((v & 0x3Fu) << 5) | ((v >> 6) & 0x1Fu));
 }
 
 /* Fetch one `bpp`-bit pixel from a big-endian bitmap line. */

@@ -69,6 +69,9 @@ typedef struct onca_gpu {
     uint32_t delay_target;
     uint8_t  delay_pending;
     uint8_t  mac_lock;       /* inside an IMULTN/IMACN..RESMAC group: no IRQs */
+    uint8_t  pend_int0;      /* CTRL bit 2 written: host-forced interrupt 0,
+                              * latched until the core can take it (Wolf3D
+                              * signals its DSP command mailbox this way)     */
 
     onca_mem_t *mem;    /* shared system bus for LOAD/STORE + instr fetch    */
 

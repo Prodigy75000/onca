@@ -72,14 +72,17 @@ static void t_bitmap_clut(void) {
 
     int drawn = onca_op_render(&mem, fb, W, H);
 
+    /* CLUT/BG values are Jaguar RGB16 (red 15-11, blue 10-6, green 5-0); the
+     * renderer converts to standard RGB565. $001F = pure green -> $03E0;
+     * $07E0 = blue + half green -> $041F; $F800/$FFFF map to themselves. */
     CHECK(drawn == 1, "drawn=%d", drawn);
-    CHECK(fb[0] == 0x001F, "corner should be BG, got %04X", fb[0]);
+    CHECK(fb[0] == 0x03E0, "corner should be BG, got %04X", fb[0]);
     CHECK(fb[0 * W + 5] == 0xF800, "(5,0)=red got %04X", fb[5]);
-    CHECK(fb[0 * W + 6] == 0x07E0, "(6,0)=green got %04X", fb[6]);
+    CHECK(fb[0 * W + 6] == 0x041F, "(6,0) converted got %04X", fb[6]);
     CHECK(fb[0 * W + 7] == 0xFFFF, "(7,0)=white got %04X", fb[7]);
-    CHECK(fb[0 * W + 8] == 0x001F, "(8,0) index0 transparent -> BG got %04X", fb[8]);
+    CHECK(fb[0 * W + 8] == 0x03E0, "(8,0) index0 transparent -> BG got %04X", fb[8]);
     CHECK(fb[1 * W + 5] == 0xFFFF, "(5,1)=white got %04X", fb[1 * W + 5]);
-    CHECK(fb[1 * W + 7] == 0x001F, "(7,1) untouched -> BG got %04X", fb[1 * W + 7]);
+    CHECK(fb[1 * W + 7] == 0x03E0, "(7,1) untouched -> BG got %04X", fb[1 * W + 7]);
 }
 
 static void t_offscreen_clip(void) {
@@ -104,7 +107,7 @@ static void t_offscreen_clip(void) {
     int drawn = onca_op_render(&mem, fb, W, H);
     CHECK(drawn == 1, "clipped object still drawn=%d", drawn);
     /* pixels 0..3 visible (xpos -4 + col 4..7), pixel at x=0 = col4 = index5 */
-    CHECK(fb[0] == 0x1234, "(0,0) = CLUT[5] got %04X", fb[0]);
+    CHECK(fb[0] == 0x1688, "(0,0) = CLUT[5] ($1234 Jaguar RGB16 -> $1688) got %04X", fb[0]);
 }
 
 /* Canonical license-screen list: BRANCH(past display) / BRANCH(prior) / BITMAP /
@@ -151,7 +154,12 @@ static void t_branch_guard(void) {
 }
 
 static void t_decode16(void) {
-    CHECK(onca_op_decode16(0x1234, 0) == 0x1234, "RGB passthrough");
+    /* Jaguar RGB16: red 15-11, blue 10-6, green 5-0 (Tech Ref video mode 3),
+     * converted to standard RGB565 for the framebuffer. */
+    CHECK(onca_op_decode16(0x003F, 0) == 0x07E0, "Jaguar pure green -> 565 green");
+    CHECK(onca_op_decode16(0x07C0, 0) == 0x001F, "Jaguar pure blue -> 565 blue");
+    CHECK(onca_op_decode16(0xF800, 0) == 0xF800, "red maps to itself");
+    CHECK(onca_op_decode16(0xFFFF, 0) == 0xFFFF, "white maps to itself");
     CHECK(onca_op_decode16(0xFEFF, 1) != 0, "CRY bright colour is non-black");
     CHECK(onca_op_decode16(0x0000, 1) == 0x0000, "CRY zero is black");
 }

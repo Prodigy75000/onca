@@ -57,6 +57,7 @@ Assets currently include:
 
 - `onca_libretro.dll` (Windows)
 - `onca_libretro.so` (Android arm64)
+-  `onca_libretro_so` (Linux)
 
 ## Project Structure
 

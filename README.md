@@ -40,6 +40,21 @@ Supported content:
 - `.j64` / `.rom` / `.bin` cartridge images
 - `.jag` dev-kit executables (loaded directly into RAM, no BIOS required)
 
+## Known issues:
+
+Music timbre: synthesized music plays notes at the right times but sounds garbled (under investigation; sound effects are correct)
+Cartridge EEPROM works in-session but isn't saved to disk yet, so game settings don't survive a restart
+No save states (retro_serialize not implemented)
+NTSC only, single controller only, no Team Tap
+JagLink/ComLynx networking isn't emulated (co-op connect attempts can be aborted with Option)
+No Jaguar CD support
+
+## Compatibility:
+
+Doom: fully playable start to finish, with sound
+Alien vs Predator: launches but renders a black screen
+Dev-kit .jag executables: several homebrew demos run; some homebrew cartridge images don't boot yet
+
 ## Building
 
 ```bash
@@ -57,7 +72,7 @@ Assets currently include:
 
 - `onca_libretro.dll` (Windows)
 - `onca_libretro.so` (Android arm64)
--  `onca_libretro_so` (Linux)
+- `onca_libretro_so` (Linux)
 
 ## Project Structure
 

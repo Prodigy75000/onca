@@ -1,0 +1,18 @@
+# build artifacts
+build/
+*.o
+*.exe
+*.so
+*.dll
+*.dylib
+
+# test/probe output
+*.ppm
+*.png
+
+# copyrighted material - never commit
+bios/
+*.rom
+*.j64
+*.bin
+*.jag
